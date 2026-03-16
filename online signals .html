@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Live Crypto Signals with WebSocket</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: #121212; 
+            color: #e0e0e0; 
+            padding: 20px; 
+            margin: 0;
+        }
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        select, button { 
+            padding: 10px 15px; 
+            background: #333; 
+            color: white; 
+            border: none; 
+            border-radius: 4px; 
+            font-size: 16px;
+            min-width: 120px;
+        }
+        .signal-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 15px;
+        }
+        .signal-card { 
+            background: #1e1e1e; 
+            border-radius: 8px; 
+            padding: 15px;
+            border-left: 5px solid #666; 
+            transition: all 0.3s ease;
+        }
+        .signal-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        .buy { border-left-color: #4CAF50; }
+        .sell { border-left-color: #F44336; }
+        .wait { border-left-color: #FFC107; }
+        .pair-name {
+            font-weight: bold;
+            font-size: 18px;
+            margin-bottom: 5px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .price {
+            font-size: 16px;
+            margin: 5px 0;
+        }
+        .rsi-container {
+            margin: 10px 0;
+        }
+        .rsi-value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .rsi-low { color: #4CAF50; }
+        .rsi-high { color: #F44336; }
+        .rsi-normal { color: #FFC107; }
+        .indicators {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .indicator {
+            text-align: center;
+            flex: 1;
+        }
+        .indicator-value {
+            font-weight: bold;
+            font-size: 16px;
+        }
+        .signal {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #333;
+            font-weight: bold;
+        }
+        .loading { 
+            color: #FFC107; 
+            text-align: center; 
+            padding: 40px; 
+            grid-column: 1 / -1;
+            font-size: 18px;
+        }
+        .last-updated { 
+            font-size: 14px; 
+            color: #777; 
+            text-align: center; 
+            margin-top: 20px;
+            grid-column: 1 / -1;
+        }
+        .auto-refresh { 
+            display: flex; 
+            align-items: center; 
+            justify-content: center;
+            margin: 15px 0; 
+            gap: 10px;
+            grid-column: 1 / -1;
+        }
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .connected {
+            background: #4CAF50;
+        }
+        .disconnected {
+            background: #F44336;
+        }
+        @media (max-width: 600px) {
+            .signal-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Live Crypto Signals with WebSocket</h1>
+        
+        <div class="controls">
+            <select id="tf">
+                <option value="1m">1 Minute</option>
+                <option value="5m">5 Minutes</option>
+                <option value="15m">15 Minutes</option>
+                <option value="1h">1 Hour</option>
+                <option value="4h">4 Hours</option>
+            </select>
+            <button id="refreshBtn">Refresh All</button>
+        </div>
+        
+        <div class="auto-refresh">
+            <input type="checkbox" id="autoRefresh" checked>
+            <label for="autoRefresh">Auto-refresh every 30 seconds</label>
+        </div>
+        
+        <div class="signal-grid" id="signalsContainer">
+            <div class="loading">Connecting to live market data...</div>
+        </div>
+        
+        <div id="lastUpdated" class="last-updated"></div>
+        <div id="connectionStatus" class="connection-status disconnected">Disconnected</div>
+    </div>
+
+    <script>
+        // Configuration
+        const cryptoPairs = [
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+            "ADAUSDT", "DOGEUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT"
+        ];
+
+        const config = {
+            refreshInterval: 30000, // 30 seconds
+            binanceApi: "https://api.binance.com/api/v3",
+            maxRetries: 3
+        };
+
+        // Global variables
+        let refreshTimer = null;
+        let isAutoRefresh = true;
+        let retryCount = 0;
+        let ws = null;
+        let priceData = {};
+        let historicalData = {};
+
+        // DOM Elements
+        const autoRefreshCheckbox = document.getElementById("autoRefresh");
+        const refreshBtn = document.getElementById("refreshBtn");
+        const container = document.getElementById("signalsContainer");
+        const lastUpdated = document.getElementById("lastUpdated");
+        const connectionStatus = document.getElementById("connectionStatus");
+
+        // Initialize WebSocket connection
+        function connectWebSocket() {
+            if (ws) {
+                ws.close();
+            }
+
+            ws = new WebSocket("wss://stream.binance.com:9443/ws/!ticker@arr");
+            
+            ws.onopen = () => {
+                console.log("WebSocket connected");
+                connectionStatus.textContent = "Connected";
+                connectionStatus.className = "connection-status connected";
+                retryCount = 0;
+                loadInitialData();
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                updatePriceData(data);
+                updateUI();
+            };
+            
+            ws.onclose = () => {
+                console.log("WebSocket disconnected");
+                connectionStatus.textContent = "Disconnected";
+                connectionStatus.className = "connection-status disconnected";
+                
+                if (retryCount < config.maxRetries) {
+                    retryCount++;
+                    console.log(`Attempting to reconnect (${retryCount}/${config.maxRetries})...`);
+                    setTimeout(connectWebSocket, 5000);
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error("WebSocket error:", error);
+            };
+        }
+
+        // Load initial historical data
+        async function loadInitialData() {
+            container.innerHTML = '<div class="loading">Loading historical data...</div>';
+            
+            try {
+                const promises = cryptoPairs.map(pair => 
+                    fetchHistoricalData(pair, document.getElementById("tf").value)
+                );
+                
+                await Promise.all(promises);
+                updateUI();
+                
+                if (isAutoRefresh) {
+                    startAutoRefresh();
+                }
+            } catch (error) {
+                console.error("Error loading initial data:", error);
+                container.innerHTML = `<div class="error">Error loading historical data: ${error.message}</div>`;
+            }
+        }
+
+        // Fetch historical data for a pair
+        async function fetchHistoricalData(pair, timeframe) {
+            try {
+                const url = `${config.binanceApi}/klines?symbol=${pair}&interval=${timeframe}&limit=300`;
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    throw new Error(`API Error: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const closes = data.map(candle => parseFloat(candle[4]));
+                
+                historicalData[pair] = {
+                    closes,
+                    rsi: calculateRSI(closes),
+                    ema50: calculateEMA(closes, 50).pop(),
+                    ema200: calculateEMA(closes, 200).pop(),
+                    lastUpdated: Date.now()
+                };
+                
+            } catch (error) {
+                console.error(`Error fetching historical data for ${pair}:`, error);
+                // Initialize with empty data if fetch fails
+                historicalData[pair] = {
+                    closes: [],
+                    rsi: 50,
+                    ema50: 0,
+                    ema200: 0,
+                    lastUpdated: 0
+                };
+            }
+        }
+
+        // Update price data from WebSocket
+        function updatePriceData(tickerData) {
+            tickerData.forEach(ticker => {
+                const pair = ticker.s;
+                if (cryptoPairs.includes(pair)) {
+                    priceData[pair] = {
+                        price: parseFloat(ticker.c),
+                        change: parseFloat(ticker.P),
+                        volume: parseFloat(ticker.v),
+                        timestamp: Date.now()
+                    };
+                }
+            });
+        }
+
+        // Update the UI with latest data
+        function updateUI() {
+            if (Object.keys(priceData).length === 0 || Object.keys(historicalData).length === 0) {
+                return;
+            }
+
+            const signalsHTML = cryptoPairs.map(pair => {
+                const priceInfo = priceData[pair] || { price: 0, change: 0 };
+                const historicalInfo = historicalData[pair] || { 
+                    rsi: 50, 
+                    ema50: 0, 
+                    ema200: 0 
+                };
+                
+                const currentPrice = priceInfo.price;
+                const rsi = historicalInfo.rsi;
+                const ema50 = historicalInfo.ema50;
+                const ema200 = historicalInfo.ema200;
+                
+                // Generate signal
+                let signal = "WAIT";
+                if (rsi < 30 && ema50 > ema200) signal = "BUY";
+                if (rsi > 70 && ema50 < ema200) signal = "SELL";
+                
+                // Calculate TP/SL
+                const tp = signal === "BUY" ? (currentPrice * 1.02).toFixed(4) : 
+                          signal === "SELL" ? (currentPrice * 0.98).toFixed(4) : "-";
+                const sl = signal === "BUY" ? (currentPrice * 0.98).toFixed(4) : 
+                          signal === "SELL" ? (currentPrice * 1.02).toFixed(4) : "-";
+                
+                // Price change color
+                const changeColor = priceInfo.change >= 0 ? "#4CAF50" : "#F44336";
+                const changeSymbol = priceInfo.change >= 0 ? "▲" : "▼";
+                
+                return `
+                    <div class="signal-card ${signal.toLowerCase()}">
+                        <div class="pair-name">
+                            <span>${pair.replace('USDT', '/USDT')}</span>
+                            <span style="color: ${changeColor}">
+                                ${changeSymbol} ${Math.abs(priceInfo.change)}%
+                            </span>
+                        </div>
+                        <div class="price">$${currentPrice.toFixed(4)}</div>
+                        
+                        <div class="rsi-container">
+                            <div class="rsi-value ${getRsiClass(rsi)}">
+                                RSI: ${rsi.toFixed(2)} ${getRsiStatus(rsi)}
+                            </div>
+                        </div>
+                        
+                        <div class="indicators">
+                            <div class="indicator">
+                                <div>EMA 50</div>
+                                <div class="indicator-value">${ema50.toFixed(4)}</div>
+                            </div>
+                            <div class="indicator">
+                                <div>EMA 200</div>
+                                <div class="indicator-value">${ema200.toFixed(4)}</div>
+                            </div>
+                        </div>
+                        
+                        <div class="signal">
+                            <strong>Signal:</strong> ${signal}
+                            ${signal !== 'WAIT' ? 
+                                `<div style="margin-top: 5px;">TP: ${tp} | SL: ${sl}</div>` : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            container.innerHTML = signalsHTML;
+            lastUpdated.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+        }
+
+        // Refresh all data
+        async function refreshAllData() {
+            container.innerHTML = '<div class="loading">Refreshing data...</div>';
+            try {
+                await loadInitialData();
+            } catch (error) {
+                console.error("Error refreshing data:", error);
+            }
+        }
+
+        // Helper functions
+        function timeframeDisplay(tf) {
+            const map = { 
+                "1m": "1m", 
+                "5m": "5m", 
+                "15m": "15m", 
+                "1h": "1h",
+                "4h": "4h"
+            };
+            return map[tf] || tf;
+        }
+        
+        function getRsiStatus(rsi) {
+            if (rsi < 30) return "🔻 Oversold";
+            if (rsi > 70) return "🔺 Overbought";
+            return "";
+        }
+        
+        function getRsiClass(rsi) {
+            if (rsi < 30) return "rsi-low";
+            if (rsi > 70) return "rsi-high";
+            return "rsi-normal";
+        }
+        
+        function calculateRSI(prices, period = 14) {
+            if (prices.length < period + 1) return 50;
+            
+            let gains = 0, losses = 0;
+            for (let i = 1; i <= period; i++) {
+                const diff = prices[i] - prices[i - 1];
+                if (diff > 0) gains += diff;
+                else losses -= diff;
+            }
+            
+            const avgGain = gains / period;
+            const avgLoss = losses / period;
+            
+            if (avgLoss === 0) return 100;
+            const rs = avgGain / avgLoss;
+            return 100 - (100 / (1 + rs));
+        }
+        
+        function calculateEMA(prices, period) {
+            const k = 2 / (period + 1);
+            let ema = [prices[0]];
+            for (let i = 1; i < prices.length; i++) {
+                ema.push((prices[i] * k) + (ema[i - 1] * (1 - k)));
+            }
+            return ema;
+        }
+        
+        function startAutoRefresh() {
+            stopAutoRefresh();
+            refreshTimer = setTimeout(() => {
+                refreshAllData();
+            }, config.refreshInterval);
+        }
+        
+        function stopAutoRefresh() {
+            if (refreshTimer) {
+                clearTimeout(refreshTimer);
+                refreshTimer = null;
+            }
+        }
+
+        // Event listeners
+        autoRefreshCheckbox.addEventListener("change", function() {
+            isAutoRefresh = this.checked;
+            if (isAutoRefresh) {
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
+            }
+        });
+
+        refreshBtn.addEventListener("click", refreshAllData);
+
+        document.getElementById("tf").addEventListener("change", refreshAllData);
+
+        // Initialize
+        connectWebSocket();
+    </script>
+</body>
+</html>
